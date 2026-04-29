@@ -54,9 +54,16 @@
       }
     }
 
-    /* Hide the video element used for tracking */
+    /* Show the video element used for tracking as a live background */
     #input_video {
-      display: none;
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      object-fit: cover;
+      transform: scaleX(-1); /* Mirror effect so users can see themselves properly */
+      z-index: -1; /* Behind Flutter */
     }
   </style>
 </head>
