@@ -85,26 +85,30 @@
     }});
 
     hands.setOptions({
-      maxNumHands: 1, // Focus on one hand for writing
+      maxNumHands: 2, // Track both hands simultaneously
       modelComplexity: 1,
       minDetectionConfidence: 0.5,
       minTrackingConfidence: 0.5
     });
 
     hands.onResults((results) => {
-      // Hide loader once frames start processing
       if (loader) loader.style.display = 'none';
 
+      let activeHands = [];
       if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-        // Landmark 8 is the tip of the index finger
-        const indexFingerTip = results.multiHandLandmarks[0][8];
-        
-        // Pass coordinates to Flutter if the function is exposed
-        if (window.updateHandTracking) {
-          // Note: MediaPipe x is normalized 0.0-1.0 from left-to-right.
-          // Because of the camera mirror effect, we might need to invert x depending on desired UX.
-          window.updateHandTracking(1.0 - indexFingerTip.x, indexFingerTip.y);
+        for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+          const indexFingerTip = results.multiHandLandmarks[i][8];
+          activeHands.push({
+            id: i,
+            x: 1.0 - indexFingerTip.x, // Mirror effect compensation
+            y: indexFingerTip.y
+          });
         }
+      }
+
+      // Pass the serialized JSON string to Flutter
+      if (window.updateDualHandTracking) {
+        window.updateDualHandTracking(JSON.stringify(activeHands));
       }
     });
 
