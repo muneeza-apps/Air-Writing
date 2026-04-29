@@ -1,26 +1,69 @@
 import 'dart:math';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'air_writer_provider.dart';
+
+class StrokePoint {
+  final Offset position;
+  final double width;
+  StrokePoint(this.position, this.width);
+}
+
+class Stroke {
+  final List<StrokePoint> points = [];
+  final Color color;
+  final double opacity;
+  final double baseSize;
+  final bool isGlowEnabled;
+
+  Stroke({
+    required this.color,
+    required this.opacity,
+    required this.baseSize,
+    required this.isGlowEnabled,
+  });
+
+  void addPoint(Offset point) {
+    double width = baseSize;
+    if (points.isNotEmpty) {
+      // Pressure Simulation: Calculate speed between points
+      final double distance = (point - points.last.position).distance;
+      // Slower = thicker, Faster = thinner. Clamp multiplier between 0.3 and 1.5.
+      double speedFactor = (1.0 - (distance / 40.0)).clamp(0.3, 1.5);
+      width = baseSize * speedFactor;
+    }
+    points.add(StrokePoint(point, width));
+  }
+}
 
 class HandwritingPainterWidget extends StatefulWidget {
   final Widget? child;
+  final Map<int, Offset> activeHands;
+  final AirWriterProvider provider;
+  final int clearSignal;
   
-  const HandwritingPainterWidget({Key? key, this.child}) : super(key: key);
+  const HandwritingPainterWidget({
+    Key? key, 
+    this.child, 
+    required this.activeHands,
+    required this.provider,
+    required this.clearSignal,
+  }) : super(key: key);
 
   @override
   State<HandwritingPainterWidget> createState() => _HandwritingPainterWidgetState();
 }
 
 class _HandwritingPainterWidgetState extends State<HandwritingPainterWidget> with SingleTickerProviderStateMixin {
-  final List<Offset?> _points = [];
+  final Map<int, Stroke> _activeStrokes = {};
+  final List<Stroke> _completedStrokes = [];
   final List<EnergyDust> _particles = [];
   
   late Ticker _ticker;
   Duration _lastElapsed = Duration.zero;
   final Random _random = Random();
-  
-  final ValueNotifier<int> _strokeNotifier = ValueNotifier(0);
-  final ValueNotifier<int> _particleNotifier = ValueNotifier(0);
+  final ValueNotifier<int> _repaintNotifier = ValueNotifier(0);
 
   @override
   void initState() {
@@ -28,76 +71,128 @@ class _HandwritingPainterWidgetState extends State<HandwritingPainterWidget> wit
     _ticker = createTicker(_onTick)..start();
   }
 
+  @override
+  void didUpdateWidget(covariant HandwritingPainterWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    
+    // Clear functionality
+    if (widget.clearSignal != oldWidget.clearSignal) {
+      _activeStrokes.clear();
+      _completedStrokes.clear();
+      _particles.clear();
+      _repaintNotifier.value++;
+      return;
+    }
+
+    _processHandUpdates(oldWidget.activeHands, widget.activeHands);
+  }
+
+  void _processHandUpdates(Map<int, Offset> oldHands, Map<int, Offset> newHands) {
+    bool changed = false;
+
+    // Track active strokes
+    newHands.forEach((id, pos) {
+      if (!_activeStrokes.containsKey(id)) {
+        _activeStrokes[id] = Stroke(
+          color: widget.provider.selectedColor,
+          opacity: widget.provider.opacity,
+          baseSize: widget.provider.brushSize,
+          isGlowEnabled: widget.provider.isGlowEnabled,
+        );
+      }
+      
+      // Update points if moved
+      if (oldHands[id] != pos) {
+        _activeStrokes[id]!.addPoint(pos);
+        if (widget.provider.isGlowEnabled) {
+          _spawnParticles(pos, _activeStrokes[id]!.color);
+        }
+        changed = true;
+      }
+    });
+
+    // Detect lifted hands to complete strokes
+    List<int> toRemove = [];
+    _activeStrokes.forEach((id, stroke) {
+      if (!newHands.containsKey(id)) {
+        if (stroke.points.isNotEmpty) {
+          _completedStrokes.add(stroke);
+        }
+        toRemove.add(id);
+        changed = true;
+      }
+    });
+
+    for (int id in toRemove) {
+      _activeStrokes.remove(id);
+    }
+
+    if (changed) _repaintNotifier.value++;
+  }
+
+  void _spawnParticles(Offset point, Color color) {
+    int particleCount = _random.nextInt(2) + 1; 
+    for (int i = 0; i < particleCount; i++) {
+      _particles.add(EnergyDust(
+        position: point,
+        velocity: Offset((_random.nextDouble() - 0.5) * 30, -_random.nextDouble() * 40 - 10),
+        lifeSpan: 0.8,
+        size: _random.nextDouble() * 2.0 + 0.5,
+        color: color,
+      ));
+    }
+  }
+
   void _onTick(Duration elapsed) {
     final double dt = (elapsed - _lastElapsed).inMilliseconds / 1000.0;
     _lastElapsed = elapsed;
 
     if (_particles.isNotEmpty) {
-      // Remove particles whose lifeSpan is over 1 second
       _particles.removeWhere((p) => !p.update(dt));
-      _particleNotifier.value++; 
-    }
-  }
-
-  void _addPoint(Offset point) {
-    _points.add(point);
-    _strokeNotifier.value++;
-    
-    // Emit 2-3 tiny "energy dust" particles per stroke point
-    int particleCount = _random.nextInt(2) + 2; 
-    for (int i = 0; i < particleCount; i++) {
-      _particles.add(EnergyDust(
-        position: point,
-        // Small random upward drift
-        velocity: Offset((_random.nextDouble() - 0.5) * 40, -_random.nextDouble() * 50 - 10),
-        lifeSpan: 1.0, // Fade out exactly after 1 second
-        size: _random.nextDouble() * 2.0 + 0.5,
-        color: Color.lerp(
-          const Color(0xFF00FFFF), // Electric Cyan
-          const Color(0xFFB026FF), // Neon Purple
-          _random.nextDouble()
-        )!,
-      ));
+      _repaintNotifier.value++; 
     }
   }
 
   @override
   void dispose() {
     _ticker.dispose();
-    _strokeNotifier.dispose();
-    _particleNotifier.dispose();
+    _repaintNotifier.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    // GestureDetector fallback for mouse testing
     return GestureDetector(
-      onPanStart: (details) => _addPoint(details.localPosition),
-      onPanUpdate: (details) => _addPoint(details.localPosition),
+      onPanStart: (details) {
+        widget.provider.updateHandPosition(details.localPosition);
+      },
+      onPanUpdate: (details) {
+        widget.provider.updateHandPosition(details.localPosition);
+      },
       onPanEnd: (details) {
-        _points.add(null); // Null acts as a break in the path
-        _strokeNotifier.value++;
+        // Complete mouse stroke
+        if (_activeStrokes.containsKey(0)) {
+          _completedStrokes.add(_activeStrokes[0]!);
+          _activeStrokes.remove(0);
+          _repaintNotifier.value++;
+        }
       },
       child: Container(
-        color: Colors.transparent, // Capture pan events over empty areas
+        color: Colors.transparent,
         child: Stack(
           children: [
             if (widget.child != null) widget.child!,
-            
-            // 1. Solid Neon Path Layer
             RepaintBoundary(
               child: CustomPaint(
-                painter: StrokePathPainter(points: _points, repaint: _strokeNotifier),
+                painter: AdvancedStrokePainter(
+                  activeStrokes: _activeStrokes,
+                  completedStrokes: _completedStrokes,
+                  particles: _particles,
+                  repaint: _repaintNotifier,
+                ),
                 size: Size.infinite,
                 isComplex: true,
-              ),
-            ),
-            
-            // 2. High-Frequency Dust Particle Layer
-            RepaintBoundary(
-              child: CustomPaint(
-                painter: EnergyDustPainter(particles: _particles, repaint: _particleNotifier),
-                size: Size.infinite,
               ),
             ),
           ],
@@ -115,102 +210,101 @@ class EnergyDust {
   final double size;
   final Color color;
 
-  EnergyDust({
-    required this.position,
-    required this.velocity,
-    required this.lifeSpan,
-    required this.size,
-    required this.color,
-  });
+  EnergyDust({required this.position, required this.velocity, required this.lifeSpan, required this.size, required this.color});
 
   bool update(double dt) {
     age += dt;
     position += velocity * dt; 
-    return age < lifeSpan; // Alive if age < 1.0s
+    return age < lifeSpan;
   }
 }
 
-class StrokePathPainter extends CustomPainter {
-  final List<Offset?> points;
-
-  StrokePathPainter({required this.points, required Listenable repaint}) : super(repaint: repaint);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (points.isEmpty) return;
-
-    // Gradient for the Pen: Electric Cyan to Neon Purple
-    final Rect rect = Offset.zero & size;
-    final Gradient gradient = const LinearGradient(
-      colors: [Color(0xFF00FFFF), Color(0xFFB026FF)], 
-      begin: Alignment.topLeft,
-      end: Alignment.bottomRight,
-    );
-
-    // Glow Paint with MaskFilter.blur
-    final glowPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 14.0
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round
-      ..shader = gradient.createShader(rect)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8.0); // Creates true Neon Glow
-
-    // Solid Core Paint (Brighter inner line)
-    final corePaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 4.0
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round
-      ..shader = gradient.createShader(rect); 
-
-    // Convert Points into a continuous Path
-    Path path = Path();
-    bool isNewPath = true;
-
-    for (int i = 0; i < points.length; i++) {
-      if (points[i] == null) {
-        isNewPath = true;
-      } else {
-        if (isNewPath) {
-          path.moveTo(points[i]!.dx, points[i]!.dy);
-          isNewPath = false;
-        } else {
-          path.lineTo(points[i]!.dx, points[i]!.dy);
-        }
-      }
-    }
-
-    // Draw the blurred glow behind
-    canvas.drawPath(path, glowPaint);
-    // Draw the sharp core on top
-    canvas.drawPath(path, corePaint);
-  }
-
-  @override
-  bool shouldRepaint(covariant StrokePathPainter oldDelegate) => true; 
-}
-
-class EnergyDustPainter extends CustomPainter {
+class AdvancedStrokePainter extends CustomPainter {
+  final Map<int, Stroke> activeStrokes;
+  final List<Stroke> completedStrokes;
   final List<EnergyDust> particles;
 
-  EnergyDustPainter({required this.particles, required Listenable repaint}) : super(repaint: repaint);
+  AdvancedStrokePainter({
+    required this.activeStrokes, 
+    required this.completedStrokes, 
+    required this.particles, 
+    required Listenable repaint
+  }) : super(repaint: repaint);
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..blendMode = BlendMode.screen;
+    // 1. Draw all completed strokes
+    for (var stroke in completedStrokes) {
+      _drawStroke(canvas, stroke);
+    }
+    
+    // 2. Draw active strokes
+    for (var stroke in activeStrokes.values) {
+      _drawStroke(canvas, stroke);
+    }
 
+    // 3. Draw particles
+    final particlePaint = Paint()..blendMode = BlendMode.screen;
     for (var p in particles) {
-      // Linear fade out over 1 second
-      double opacity = 1.0 - (p.age / p.lifeSpan);
-      if (opacity < 0) opacity = 0;
+      double opacity = (1.0 - (p.age / p.lifeSpan)).clamp(0.0, 1.0);
+      particlePaint.color = p.color.withOpacity(opacity);
+      canvas.drawCircle(p.position, p.size, particlePaint);
+    }
+  }
 
-      paint.color = p.color.withOpacity(opacity);
-      canvas.drawCircle(p.position, p.size, paint);
+  void _drawStroke(Canvas canvas, Stroke stroke) {
+    if (stroke.points.isEmpty) return;
+
+    final paint = Paint()
+      ..color = stroke.color.withOpacity(stroke.opacity)
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    final glowPaint = stroke.isGlowEnabled 
+      ? (Paint()
+          ..color = stroke.color.withOpacity(stroke.opacity * 0.4)
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 12.0))
+      : null;
+
+    if (stroke.points.length == 1) {
+      paint.strokeWidth = stroke.points.first.width;
+      canvas.drawPoints(ui.PointMode.points, [stroke.points.first.position], paint);
+      if (glowPaint != null) {
+        glowPaint.strokeWidth = stroke.points.first.width * 2;
+        canvas.drawPoints(ui.PointMode.points, [stroke.points.first.position], glowPaint);
+      }
+      return;
+    }
+
+    // Smooth Bezier Rendering with Dynamic Width (Pressure Simulation)
+    for (int i = 0; i < stroke.points.length - 1; i++) {
+      final p1 = stroke.points[i];
+      final p2 = stroke.points[i+1];
+      
+      final path = Path();
+      path.moveTo(p1.position.dx, p1.position.dy);
+      
+      if (i < stroke.points.length - 2) {
+        final p3 = stroke.points[i+2];
+        final mid = Offset((p2.position.dx + p3.position.dx) / 2, (p2.position.dy + p3.position.dy) / 2);
+        path.quadraticBezierTo(p2.position.dx, p2.position.dy, mid.dx, mid.dy);
+      } else {
+        path.lineTo(p2.position.dx, p2.position.dy);
+      }
+      
+      paint.strokeWidth = p2.width;
+      if (glowPaint != null) {
+        glowPaint.strokeWidth = p2.width * 2.5;
+        canvas.drawPath(path, glowPaint);
+      }
+      canvas.drawPath(path, paint);
     }
   }
 
   @override
-  bool shouldRepaint(covariant EnergyDustPainter oldDelegate) => true;
+  bool shouldRepaint(covariant AdvancedStrokePainter oldDelegate) => true; 
 }

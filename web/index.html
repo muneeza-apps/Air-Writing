@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html>
+
 <head>
   <base href="$FLUTTER_BASE_HREF">
 
@@ -7,7 +8,6 @@
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="description" content="AirWriter Pro - Anti-Gravity Hand Tracking App">
 
-  <!-- iOS meta tags & icons -->
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <meta name="apple-mobile-web-app-title" content="AirWriter Pro">
@@ -16,13 +16,15 @@
   <title>AirWriter Pro</title>
   <link rel="manifest" href="manifest.json">
 
-  <!-- Optimization: Preconnect to external domains -->
   <link rel="preconnect" href="https://fonts.gstatic.com">
 
-  <!-- Optimization: Inline critical CSS to prevent render-blocking and show a premium loader immediately -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+
   <style>
     body {
-      background-color: #000000; /* Deep black to match AntiGravityBase */
+      background-color: #000000;
       margin: 0;
       display: flex;
       justify-content: center;
@@ -30,15 +32,17 @@
       height: 100vh;
       overflow: hidden;
     }
-    
+
     .glow-loader {
       width: 50px;
       height: 50px;
       border: 3px solid rgba(187, 134, 252, 0.2);
-      border-top-color: #BB86FC; /* Neon Purple */
+      border-top-color: #BB86FC;
       border-radius: 50%;
       animation: spin 1s cubic-bezier(0.5, 0.1, 0.4, 0.9) infinite;
       box-shadow: 0 0 20px rgba(187, 134, 252, 0.4);
+      z-index: 1000;
+      position: absolute;
     }
 
     @keyframes spin {
@@ -46,13 +50,161 @@
         transform: rotate(360deg);
       }
     }
+
+    #input_video {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      object-fit: cover;
+      transform: scaleX(-1);
+      z-index: -1;
+    }
+
+    /* ✅ FIX 1: pointer-events none = mouse se drawing band */
+    #drawing_canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      z-index: 1;
+      pointer-events: none;
+    }
   </style>
 </head>
+
 <body>
-  <!-- Optimized Loading Indicator -->
-  <div class="glow-loader"></div>
-  
-  <!-- Optimization: Asynchronously load Flutter's bootstrap script so it doesn't block HTML parsing -->
+
+  <div class="glow-loader" id="loader"></div>
+  <video id="input_video" autoplay playsinline muted></video>
+  <canvas id="drawing_canvas"></canvas>
+
+  <script>
+    const videoElement = document.getElementById('input_video');
+    const loader = document.getElementById('loader');
+    const drawingCanvas = document.getElementById('drawing_canvas');
+    const ctx = drawingCanvas.getContext('2d');
+
+    function resizeCanvas() {
+      drawingCanvas.width = window.innerWidth;
+      drawingCanvas.height = window.innerHeight;
+    }
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+
+    // ✅ FIX 1: Mouse/touch events completely blocked
+    ['mousedown', 'mousemove', 'mouseup', 'mouseleave',
+      'touchstart', 'touchmove', 'touchend',
+      'pointerdown', 'pointermove', 'pointerup'].forEach(evt => {
+        document.addEventListener(evt, (e) => {
+          if (e.target.id === 'drawing_canvas' || e.target.id === 'input_video') {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+          }
+        }, true);
+      });
+
+    // ✅ FIX 2: Clear Canvas - Flutter se call hoga
+    // js.context.callMethod('clearDrawingCanvas', []);
+    window.clearDrawingCanvas = function () {
+      ctx.clearRect(0, 0, drawingCanvas.width, drawingCanvas.height);
+      prevPositions = {};
+      console.log('✅ Canvas cleared!');
+    };
+
+    let prevPositions = {};
+    const HAND_COLORS = ['#00FFFF', '#FF00FF'];
+
+    const hands = new Hands({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+
+    hands.onResults((results) => {
+      if (loader) loader.style.display = 'none';
+
+      let activeHands = [];
+      let currentIds = new Set();
+
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+          const landmarks = results.multiHandLandmarks[i];
+          const tip = landmarks[8]; // Index finger tip
+          const pip = landmarks[6]; // Index finger middle joint
+
+          // ✅ FIX 3: Finger lift detection
+          // Finger UP (tip higher than pip) = draw
+          // Finger DOWN (tip lower than pip) = pen lifted = stop
+          const isFingerUp = tip.y < pip.y;
+
+          const mirroredX = 1.0 - tip.x;
+          const screenX = mirroredX * drawingCanvas.width;
+          const screenY = tip.y * drawingCanvas.height;
+
+          currentIds.add(i);
+
+          if (isFingerUp) {
+            activeHands.push({ id: i, x: mirroredX, y: tip.y, drawing: true });
+
+            if (prevPositions[i]) {
+              ctx.beginPath();
+              ctx.moveTo(prevPositions[i].x, prevPositions[i].y);
+              ctx.lineTo(screenX, screenY);
+              ctx.strokeStyle = HAND_COLORS[i] || '#FFFFFF';
+              ctx.lineWidth = 4;
+              ctx.lineCap = 'round';
+              ctx.lineJoin = 'round';
+              ctx.shadowBlur = 20;
+              ctx.shadowColor = HAND_COLORS[i] || '#FFFFFF';
+              ctx.stroke();
+            }
+            prevPositions[i] = { x: screenX, y: screenY };
+
+          } else {
+            // Finger folded = pen lifted = letters nahi joingi
+            activeHands.push({ id: i, x: mirroredX, y: tip.y, drawing: false });
+            delete prevPositions[i];
+          }
+        }
+
+        Object.keys(prevPositions).forEach(id => {
+          if (!currentIds.has(parseInt(id))) {
+            delete prevPositions[id];
+          }
+        });
+
+      } else {
+        prevPositions = {};
+        activeHands = [];
+      }
+
+      if (window.updateDualHandTracking) {
+        window.updateDualHandTracking(JSON.stringify(activeHands));
+      }
+    });
+
+    const camera = new Camera(videoElement, {
+      onFrame: async () => {
+        await hands.send({ image: videoElement });
+      },
+      width: 1280,
+      height: 720
+    });
+
+    camera.start().catch((err) => {
+      console.error("Camera error:", err);
+    });
+  </script>
+
   <script src="flutter_bootstrap.js" async></script>
 </body>
+
 </html>
