@@ -27,9 +27,7 @@ class Stroke {
   void addPoint(Offset point) {
     double width = baseSize;
     if (points.isNotEmpty) {
-      // Pressure Simulation: Calculate speed between points
       final double distance = (point - points.last.position).distance;
-      // Slower = thicker, Faster = thinner. Clamp multiplier between 0.3 and 1.5.
       double speedFactor = (1.0 - (distance / 40.0)).clamp(0.3, 1.5);
       width = baseSize * speedFactor;
     }
@@ -75,7 +73,7 @@ class _HandwritingPainterWidgetState extends State<HandwritingPainterWidget> wit
   void didUpdateWidget(covariant HandwritingPainterWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
     
-    // Clear functionality
+    // ✅ FIX: Clear canvas
     if (widget.clearSignal != oldWidget.clearSignal) {
       _activeStrokes.clear();
       _completedStrokes.clear();
@@ -90,7 +88,6 @@ class _HandwritingPainterWidgetState extends State<HandwritingPainterWidget> wit
   void _processHandUpdates(Map<int, Offset> oldHands, Map<int, Offset> newHands) {
     bool changed = false;
 
-    // Track active strokes
     newHands.forEach((id, pos) {
       if (!_activeStrokes.containsKey(id)) {
         _activeStrokes[id] = Stroke(
@@ -101,7 +98,6 @@ class _HandwritingPainterWidgetState extends State<HandwritingPainterWidget> wit
         );
       }
       
-      // Update points if moved
       if (oldHands[id] != pos) {
         _activeStrokes[id]!.addPoint(pos);
         if (widget.provider.isGlowEnabled) {
@@ -111,7 +107,7 @@ class _HandwritingPainterWidgetState extends State<HandwritingPainterWidget> wit
       }
     });
 
-    // Detect lifted hands to complete strokes
+    // ✅ FIX: Finger lift = stroke complete = letters nahi joingi
     List<int> toRemove = [];
     _activeStrokes.forEach((id, stroke) {
       if (!newHands.containsKey(id)) {
@@ -162,41 +158,25 @@ class _HandwritingPainterWidgetState extends State<HandwritingPainterWidget> wit
 
   @override
   Widget build(BuildContext context) {
-    // GestureDetector fallback for mouse testing
-    return GestureDetector(
-      onPanStart: (details) {
-        widget.provider.updateHandPosition(details.localPosition);
-      },
-      onPanUpdate: (details) {
-        widget.provider.updateHandPosition(details.localPosition);
-      },
-      onPanEnd: (details) {
-        // Complete mouse stroke
-        if (_activeStrokes.containsKey(0)) {
-          _completedStrokes.add(_activeStrokes[0]!);
-          _activeStrokes.remove(0);
-          _repaintNotifier.value++;
-        }
-      },
-      child: Container(
-        color: Colors.transparent,
-        child: Stack(
-          children: [
-            if (widget.child != null) widget.child!,
-            RepaintBoundary(
-              child: CustomPaint(
-                painter: AdvancedStrokePainter(
-                  activeStrokes: _activeStrokes,
-                  completedStrokes: _completedStrokes,
-                  particles: _particles,
-                  repaint: _repaintNotifier,
-                ),
-                size: Size.infinite,
-                isComplex: true,
+    // ✅ FIX: GestureDetector completely removed — no mouse drawing
+    return Container(
+      color: Colors.transparent,
+      child: Stack(
+        children: [
+          if (widget.child != null) widget.child!,
+          RepaintBoundary(
+            child: CustomPaint(
+              painter: AdvancedStrokePainter(
+                activeStrokes: _activeStrokes,
+                completedStrokes: _completedStrokes,
+                particles: _particles,
+                repaint: _repaintNotifier,
               ),
+              size: Size.infinite,
+              isComplex: true,
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -210,7 +190,13 @@ class EnergyDust {
   final double size;
   final Color color;
 
-  EnergyDust({required this.position, required this.velocity, required this.lifeSpan, required this.size, required this.color});
+  EnergyDust({
+    required this.position,
+    required this.velocity,
+    required this.lifeSpan,
+    required this.size,
+    required this.color,
+  });
 
   bool update(double dt) {
     age += dt;
@@ -228,22 +214,18 @@ class AdvancedStrokePainter extends CustomPainter {
     required this.activeStrokes, 
     required this.completedStrokes, 
     required this.particles, 
-    required Listenable repaint
+    required Listenable repaint,
   }) : super(repaint: repaint);
 
   @override
   void paint(Canvas canvas, Size size) {
-    // 1. Draw all completed strokes
     for (var stroke in completedStrokes) {
       _drawStroke(canvas, stroke);
     }
-    
-    // 2. Draw active strokes
     for (var stroke in activeStrokes.values) {
       _drawStroke(canvas, stroke);
     }
 
-    // 3. Draw particles
     final particlePaint = Paint()..blendMode = BlendMode.screen;
     for (var p in particles) {
       double opacity = (1.0 - (p.age / p.lifeSpan)).clamp(0.0, 1.0);
@@ -280,17 +262,19 @@ class AdvancedStrokePainter extends CustomPainter {
       return;
     }
 
-    // Smooth Bezier Rendering with Dynamic Width (Pressure Simulation)
     for (int i = 0; i < stroke.points.length - 1; i++) {
       final p1 = stroke.points[i];
-      final p2 = stroke.points[i+1];
+      final p2 = stroke.points[i + 1];
       
       final path = Path();
       path.moveTo(p1.position.dx, p1.position.dy);
       
       if (i < stroke.points.length - 2) {
-        final p3 = stroke.points[i+2];
-        final mid = Offset((p2.position.dx + p3.position.dx) / 2, (p2.position.dy + p3.position.dy) / 2);
+        final p3 = stroke.points[i + 2];
+        final mid = Offset(
+          (p2.position.dx + p3.position.dx) / 2,
+          (p2.position.dy + p3.position.dy) / 2,
+        );
         path.quadraticBezierTo(p2.position.dx, p2.position.dy, mid.dx, mid.dy);
       } else {
         path.lineTo(p2.position.dx, p2.position.dy);
@@ -306,5 +290,5 @@ class AdvancedStrokePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant AdvancedStrokePainter oldDelegate) => true; 
+  bool shouldRepaint(covariant AdvancedStrokePainter oldDelegate) => true;
 }
